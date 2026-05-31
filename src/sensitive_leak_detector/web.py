@@ -42,6 +42,7 @@ class EndpointFinding:
 class CrawlResult:
     findings: list[Finding]
     discovered_api_paths: list[str]
+    analyzed_javascript_urls: list[str]
 
 
 COMMON_PROBES: tuple[EndpointProbe, ...] = (
@@ -185,15 +186,19 @@ class LinkExtractor(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.links: list[str] = []
+        self.script_links: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        interesting_attrs = {"a": "href", "link": "href", "script": "src", "iframe": "src"}
+        interesting_attrs = {"a": "href", "link": "href", "iframe": "src"}
         attr_name = interesting_attrs.get(tag.lower())
-        if not attr_name:
-            return
-        for name, value in attrs:
-            if name.lower() == attr_name and value:
-                self.links.append(value)
+        if attr_name:
+            for name, value in attrs:
+                if name.lower() == attr_name and value:
+                    self.links.append(value)
+        if tag.lower() == "script":
+            for name, value in attrs:
+                if name.lower() == "src" and value:
+                    self.script_links.append(value)
 
 
 def normalize_base_url(value: str) -> str:
@@ -214,6 +219,17 @@ def normalize_page_url(base_url: str, candidate: str) -> str | None:
     if parsed.scheme not in {"http", "https"}:
         return None
     if parsed.netloc != parsed_base.netloc:
+        return None
+    if parsed.path.lower().endswith(PAGE_EXTENSIONS_TO_SKIP):
+        return None
+    return parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, ""))
+
+
+def normalize_javascript_url(base_url: str, candidate: str) -> str | None:
+    absolute = parse.urljoin(base_url, candidate)
+    parsed_base = parse.urlparse(base_url)
+    parsed = parse.urlparse(absolute)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc != parsed_base.netloc:
         return None
     if parsed.path.lower().endswith(PAGE_EXTENSIONS_TO_SKIP):
         return None
@@ -251,6 +267,20 @@ def extract_page_links(base_url: str, html: str) -> list[str]:
     links: list[str] = []
     for raw_link in parser.links:
         normalized = normalize_page_url(base_url, raw_link)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            links.append(normalized)
+    return links
+
+
+def extract_javascript_links(base_url: str, html: str) -> list[str]:
+    parser = LinkExtractor()
+    parser.feed(html)
+
+    seen: set[str] = set()
+    links: list[str] = []
+    for raw_link in parser.script_links:
+        normalized = normalize_javascript_url(base_url, raw_link)
         if normalized and normalized not in seen:
             seen.add(normalized)
             links.append(normalized)
@@ -358,6 +388,12 @@ def is_page_like(content_type: str, body: str) -> bool:
     )
 
 
+def is_html_like(content_type: str, body: str) -> bool:
+    lowered = content_type.lower()
+    stripped = body.lstrip().lower()
+    return "text/html" in lowered or "application/xhtml" in lowered or stripped.startswith("<!doctype html") or stripped.startswith("<html")
+
+
 def build_api_probes(paths: list[str] | None = None, include_defaults: bool = True) -> tuple[EndpointProbe, ...]:
     selected_paths = list(COMMON_API_PATHS) if include_defaults else []
     if paths:
@@ -432,7 +468,7 @@ def crawl_pages(
     progress: Callable[[str], None] | None = None,
 ) -> CrawlResult:
     if depth <= 0:
-        return CrawlResult(findings=[], discovered_api_paths=[])
+        return CrawlResult(findings=[], discovered_api_paths=[], analyzed_javascript_urls=[])
 
     start_url = normalize_base_url(base_url) or base_url
     queue: list[tuple[str, int]] = [(start_url, 1)]
@@ -441,6 +477,8 @@ def crawl_pages(
     findings: list[Finding] = []
     discovered_api_paths: list[str] = []
     seen_api_paths: set[str] = set()
+    analyzed_javascript_urls: list[str] = []
+    seen_javascript_urls: set[str] = set()
 
     if progress:
         progress(f"Starting page crawl at depth {depth} with max {max_pages} page(s)")
@@ -479,6 +517,36 @@ def crawl_pages(
                 if progress:
                     progress(f"Discovered API reference in page source: {api_path}")
 
+        if is_html_like(content_type, body):
+            for script_url in extract_javascript_links(current_url, body):
+                if script_url in seen_javascript_urls:
+                    continue
+                seen_javascript_urls.add(script_url)
+                if progress:
+                    progress(f"Analyzing JavaScript source: {script_url}")
+                script_result = fetch_page(script_url, timeout)
+                if script_result is None:
+                    if progress:
+                        progress(f"No JavaScript response from {script_url}")
+                    continue
+                script_status, script_content_type, script_body = script_result
+                if progress:
+                    progress(f"Received JavaScript {script_status} from {script_url}")
+                if script_status not in {200, 206}:
+                    continue
+                analyzed_javascript_urls.append(script_url)
+                script_findings = scan_text(script_body, script_url)
+                if script_findings and progress:
+                    progress(f"JavaScript findings matched at {script_url}: {len(script_findings)}")
+                findings.extend(script_findings)
+                script_api_paths = extract_api_paths(script_url, script_body)
+                for api_path in script_api_paths:
+                    if api_path not in seen_api_paths:
+                        seen_api_paths.add(api_path)
+                        discovered_api_paths.append(api_path)
+                        if progress:
+                            progress(f"Discovered API reference in JavaScript: {api_path}")
+
         if current_depth >= depth or not is_page_like(content_type, body):
             continue
 
@@ -490,6 +558,11 @@ def crawl_pages(
     if progress:
         progress(
             f"Page crawl complete: {len(visited)} page(s), "
+            f"{len(analyzed_javascript_urls)} JavaScript file(s), "
             f"{len(findings)} finding(s), {len(discovered_api_paths)} API path(s)"
         )
-    return CrawlResult(findings=findings, discovered_api_paths=discovered_api_paths)
+    return CrawlResult(
+        findings=findings,
+        discovered_api_paths=discovered_api_paths,
+        analyzed_javascript_urls=analyzed_javascript_urls,
+    )
