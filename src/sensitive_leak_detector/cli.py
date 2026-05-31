@@ -88,6 +88,7 @@ def render_text(
     findings: list[Finding],
     endpoint_findings: list[EndpointFinding] | None,
     page_findings: list[Finding] | None,
+    discovered_api_paths: list[str] | None,
 ) -> str:
     lines: list[str] = []
     if not findings:
@@ -123,6 +124,12 @@ def render_text(
     elif page_findings == []:
         lines.append("")
         lines.append("No page source findings detected.")
+
+    if discovered_api_paths:
+        lines.append("")
+        lines.append(f"{len(discovered_api_paths)} API path(s) discovered from page source:")
+        for api_path in discovered_api_paths:
+            lines.append(f"- {api_path}")
     return "\n".join(lines)
 
 
@@ -148,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
 
     endpoint_findings = None
     page_findings = None
+    discovered_api_paths: list[str] = []
     if args.url:
         log_verbose(args.verbose, f"Starting endpoint scan for {args.url}")
         endpoint_findings = scan_url(
@@ -158,23 +166,41 @@ def main(argv: list[str] | None = None) -> int:
         log_verbose(args.verbose, f"Endpoint scan complete: {len(endpoint_findings)} finding(s)")
         if args.depth > 0:
             log_verbose(args.verbose, f"Starting page source crawl for {args.url}")
-            page_findings = crawl_pages(
+            crawl_result = crawl_pages(
                 args.url,
                 depth=args.depth,
                 max_pages=args.max_pages,
                 progress=lambda message: log_verbose(args.verbose, message),
             )
+            page_findings = crawl_result.findings
+            discovered_api_paths = crawl_result.discovered_api_paths
             log_verbose(args.verbose, f"Page source crawl complete: {len(page_findings)} finding(s)")
+            known_api_paths = set(api_paths)
+            new_api_paths = [path for path in discovered_api_paths if path not in known_api_paths]
+            if new_api_paths:
+                log_verbose(args.verbose, f"Testing {len(new_api_paths)} API path(s) discovered from page source")
+                discovered_endpoint_findings = scan_url(
+                    args.url,
+                    api_paths=new_api_paths,
+                    include_common=False,
+                    progress=lambda message: log_verbose(args.verbose, message),
+                )
+                endpoint_findings.extend(discovered_endpoint_findings)
+                log_verbose(
+                    args.verbose,
+                    f"Discovered API scan complete: {len(discovered_endpoint_findings)} finding(s)",
+                )
 
     if args.format == "json":
         payload = {
             "local_findings": [finding.to_dict() for finding in findings],
             "endpoint_findings": [finding.to_dict() for finding in endpoint_findings or []],
             "page_findings": [finding.to_dict() for finding in page_findings or []],
+            "discovered_api_paths": discovered_api_paths,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(render_text(findings, endpoint_findings, page_findings))
+        print(render_text(findings, endpoint_findings, page_findings, discovered_api_paths))
 
     web_failure = any(SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[args.fail_on] for finding in endpoint_findings or [])
     page_failure = has_failure(page_findings or [], args.fail_on)
