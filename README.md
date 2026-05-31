@@ -202,6 +202,15 @@ sld . --url https://example.com --api-path-file .\api-paths.txt --format json -v
 
 爬取范围默认限制在同域名内，并会跳过图片、字体、压缩包、视频等静态资源。可以用 `--max-pages` 控制最大页面数，避免站点页面过多时耗时太长。
 
+当页面源码中发现 API 地址时，工具会自动把这些 API 加入探测队列，例如源码中的：
+
+```javascript
+fetch('/api/v1/users')
+axios.get('https://example.com/api/orders')
+```
+
+会被自动归一化为同站 API 路径并继续检测是否返回敏感数据。JSON 输出中会包含 `discovered_api_paths`，文本输出中也会列出从页面源码发现的 API 路径。
+
 接口探测只会发起普通 HTTP GET/POST 请求，不会进行绕过、爆破、利用或破坏性操作。请仅在你拥有授权的系统上使用。
 
 ## 退出码
@@ -220,6 +229,10 @@ https://example.com/api/users [200] [high] api-sensitive-data - API endpoint may
 
 1 page source finding(s) detected:
 https://example.com/:20:15 [medium] high-entropy-assignment - High-entropy value assigned to a sensitive-looking name (tok_...9a3f)
+
+2 API path(s) discovered from page source:
+- /api/v1/users
+- /api/orders
 ```
 
 ## 安全建议
