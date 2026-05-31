@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from html.parser import HTMLParser
 import json
 import socket
 import ssl
 from typing import Callable
 from urllib import error, parse, request
+
+from .scanner import Finding, scan_text
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,43 @@ SENSITIVE_API_WORDS = SENSITIVE_WORDS + (
 
 LIST_HINTS = ("[", '"data"', '"items"', '"records"', '"rows"', '"list"', '"total"')
 
+PAGE_EXTENSIONS_TO_SKIP = (
+    ".7z",
+    ".avi",
+    ".css",
+    ".gif",
+    ".gz",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".mp3",
+    ".mp4",
+    ".pdf",
+    ".png",
+    ".rar",
+    ".svg",
+    ".tar",
+    ".webp",
+    ".woff",
+    ".woff2",
+    ".zip",
+)
+
+
+class LinkExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        interesting_attrs = {"a": "href", "link": "href", "script": "src", "iframe": "src"}
+        attr_name = interesting_attrs.get(tag.lower())
+        if not attr_name:
+            return
+        for name, value in attrs:
+            if name.lower() == attr_name and value:
+                self.links.append(value)
+
 
 def normalize_base_url(value: str) -> str:
     parsed = parse.urlparse(value if "://" in value else f"https://{value}")
@@ -143,6 +183,33 @@ def normalize_base_url(value: str) -> str:
 
 def build_url(base_url: str, path: str) -> str:
     return parse.urljoin(f"{base_url.rstrip('/')}/", path.lstrip("/"))
+
+
+def normalize_page_url(base_url: str, candidate: str) -> str | None:
+    absolute = parse.urljoin(base_url, candidate)
+    parsed_base = parse.urlparse(base_url)
+    parsed = parse.urlparse(absolute)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if parsed.netloc != parsed_base.netloc:
+        return None
+    if parsed.path.lower().endswith(PAGE_EXTENSIONS_TO_SKIP):
+        return None
+    return parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, ""))
+
+
+def extract_page_links(base_url: str, html: str) -> list[str]:
+    parser = LinkExtractor()
+    parser.feed(html)
+
+    seen: set[str] = set()
+    links: list[str] = []
+    for raw_link in parser.links:
+        normalized = normalize_page_url(base_url, raw_link)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            links.append(normalized)
+    return links
 
 
 def summarize_evidence(body: str, signatures: tuple[str, ...]) -> str:
@@ -216,6 +283,36 @@ def fetch_probe(url: str, probe: EndpointProbe, timeout: float) -> tuple[int, st
         return None
 
 
+def fetch_page(url: str, timeout: float) -> tuple[int, str, str] | None:
+    headers = {
+        "User-Agent": "sensitive-leak-detector/0.1",
+        "Accept": "text/html,application/xhtml+xml,application/javascript,text/plain,*/*;q=0.8",
+    }
+    req = request.Request(url, method="GET", headers=headers)
+    try:
+        with request.urlopen(req, timeout=timeout, context=ssl.create_default_context()) as response:
+            content_type = response.headers.get("Content-Type", "")
+            body = response.read(256 * 1024).decode("utf-8", errors="replace")
+            return response.status, content_type, body
+    except error.HTTPError as exc:
+        body = exc.read(256 * 1024).decode("utf-8", errors="replace")
+        return exc.code, exc.headers.get("Content-Type", ""), body
+    except (error.URLError, TimeoutError, socket.timeout, ssl.SSLError):
+        return None
+
+
+def is_page_like(content_type: str, body: str) -> bool:
+    lowered = content_type.lower()
+    stripped = body.lstrip().lower()
+    return (
+        "text/html" in lowered
+        or "application/xhtml" in lowered
+        or "javascript" in lowered
+        or stripped.startswith("<!doctype html")
+        or stripped.startswith("<html")
+    )
+
+
 def build_api_probes(paths: list[str] | None = None) -> tuple[EndpointProbe, ...]:
     selected_paths = list(COMMON_API_PATHS)
     if paths:
@@ -278,4 +375,62 @@ def scan_url(
                     evidence=summarize_evidence(body, probe.signatures),
                 )
             )
+    return findings
+
+
+def crawl_pages(
+    base_url: str,
+    depth: int,
+    timeout: float = 5.0,
+    max_pages: int = 50,
+    progress: Callable[[str], None] | None = None,
+) -> list[Finding]:
+    if depth <= 0:
+        return []
+
+    start_url = normalize_base_url(base_url) or base_url
+    queue: list[tuple[str, int]] = [(start_url, 1)]
+    queued = {start_url}
+    visited: set[str] = set()
+    findings: list[Finding] = []
+
+    if progress:
+        progress(f"Starting page crawl at depth {depth} with max {max_pages} page(s)")
+
+    while queue and len(visited) < max_pages:
+        current_url, current_depth = queue.pop(0)
+        if current_url in visited:
+            continue
+        visited.add(current_url)
+
+        if progress:
+            progress(f"Crawling page {len(visited)}/{max_pages}: {current_url}")
+
+        result = fetch_page(current_url, timeout)
+        if result is None:
+            if progress:
+                progress(f"No page response from {current_url}")
+            continue
+
+        status, content_type, body = result
+        if progress:
+            progress(f"Received page {status} from {current_url}")
+        if status not in {200, 206}:
+            continue
+
+        page_findings = scan_text(body, current_url)
+        if page_findings and progress:
+            progress(f"Page findings matched at {current_url}: {len(page_findings)}")
+        findings.extend(page_findings)
+
+        if current_depth >= depth or not is_page_like(content_type, body):
+            continue
+
+        for link in extract_page_links(current_url, body):
+            if link not in queued and len(queued) < max_pages:
+                queued.add(link)
+                queue.append((link, current_depth + 1))
+
+    if progress:
+        progress(f"Page crawl complete: {len(visited)} page(s), {len(findings)} finding(s)")
     return findings
