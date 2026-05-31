@@ -4,6 +4,7 @@ from sensitive_leak_detector.scanner import has_failure, scan_text
 from sensitive_leak_detector.web import (
     EndpointProbe,
     build_api_probes,
+    extract_api_paths,
     extract_page_links,
     looks_interesting,
     looks_like_sensitive_api_response,
@@ -78,6 +79,21 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("https://example.com/next", links)
         self.assertIn("https://example.com/app.js", links)
         self.assertNotIn("https://other.example/x", links)
+
+    def test_extract_api_paths_from_page_source(self):
+        html = """
+        <script>
+        fetch('/api/v1/users?active=true')
+        axios.get("https://example.com/api/orders")
+        fetch("https://other.example/api/private")
+        </script>
+        """
+
+        paths = extract_api_paths("https://example.com/app", html)
+
+        self.assertIn("/api/v1/users?active=true", paths)
+        self.assertIn("/api/orders", paths)
+        self.assertNotIn("/api/private", paths)
 
 
 if __name__ == "__main__":
