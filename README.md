@@ -43,6 +43,12 @@ sld .
 sld . --format json
 ```
 
+显示检测动态：
+
+```powershell
+sld . -v
+```
+
 只在高危及以上发现时返回失败退出码：
 
 ```powershell
@@ -61,6 +67,12 @@ sld . --exclude .venv --exclude generated --exclude "*.min.js"
 
 ```powershell
 sld . --url https://example.com
+```
+
+显示接口探测过程，方便观察当前正在测试哪个地址：
+
+```powershell
+sld . --url https://example.com -v
 ```
 
 当前内置探测包括：
@@ -146,6 +158,12 @@ sld . --url https://example.com --api-path-file .\api-paths.txt
 
 ```powershell
 sld . --url https://example.com --api-path-file .\api-paths.txt --format json
+```
+
+配合 `-v` 可以看到每个 API 地址的探测状态：
+
+```powershell
+sld . --url https://example.com --api-path-file .\api-paths.txt --format json -v
 ```
 
 接口探测只会发起普通 HTTP GET/POST 请求，不会进行绕过、爆破、利用或破坏性操作。请仅在你拥有授权的系统上使用。
