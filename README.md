@@ -75,6 +75,24 @@ sld . --url https://example.com
 sld . --url https://example.com -v
 ```
 
+检测网页源码中的敏感信息：
+
+```powershell
+sld . --url https://example.com -d 1
+```
+
+递归检测同域名页面，深度为 2，并显示动态：
+
+```powershell
+sld . --url https://example.com -d 2 -v
+```
+
+限制最多检测 30 个页面：
+
+```powershell
+sld . --url https://example.com -d 3 --max-pages 30 -v
+```
+
 当前内置探测包括：
 
 - `/.env`
@@ -166,6 +184,24 @@ sld . --url https://example.com --api-path-file .\api-paths.txt --format json
 sld . --url https://example.com --api-path-file .\api-paths.txt --format json -v
 ```
 
+## 页面源码检测
+
+页面源码里也可能泄露敏感信息，例如：
+
+- HTML 注释里的测试账号或后台地址。
+- 内联 JavaScript 里的 `token`、`api_key`、`password`、接口地址。
+- 打包后前端页面里的环境变量、调试配置、第三方服务 Key。
+- 页面引用的同站 JavaScript 文件里的敏感配置。
+
+使用 `-d` 或 `--depth` 开启同域名页面爬取：
+
+- `-d 0`：默认值，不爬页面源码。
+- `-d 1`：只检测入口页面源码。
+- `-d 2`：检测入口页面，以及入口页面发现的同站链接。
+- `-d 3`：继续向下递归一层。
+
+爬取范围默认限制在同域名内，并会跳过图片、字体、压缩包、视频等静态资源。可以用 `--max-pages` 控制最大页面数，避免站点页面过多时耗时太长。
+
 接口探测只会发起普通 HTTP GET/POST 请求，不会进行绕过、爆破、利用或破坏性操作。请仅在你拥有授权的系统上使用。
 
 ## 退出码
@@ -181,6 +217,9 @@ No local sensitive data findings detected.
 
 1 exposed endpoint finding(s) detected:
 https://example.com/api/users [200] [high] api-sensitive-data - API endpoint may expose sensitive business or user data ("data":[{"user_id":1,"email":"a@example.com")
+
+1 page source finding(s) detected:
+https://example.com/:20:15 [medium] high-entropy-assignment - High-entropy value assigned to a sensitive-looking name (tok_...9a3f)
 ```
 
 ## 安全建议
