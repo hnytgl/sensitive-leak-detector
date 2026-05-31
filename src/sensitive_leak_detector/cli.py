@@ -89,6 +89,7 @@ def render_text(
     endpoint_findings: list[EndpointFinding] | None,
     page_findings: list[Finding] | None,
     discovered_api_paths: list[str] | None,
+    analyzed_javascript_urls: list[str] | None,
 ) -> str:
     lines: list[str] = []
     if not findings:
@@ -130,6 +131,12 @@ def render_text(
         lines.append(f"{len(discovered_api_paths)} API path(s) discovered from page source:")
         for api_path in discovered_api_paths:
             lines.append(f"- {api_path}")
+
+    if analyzed_javascript_urls:
+        lines.append("")
+        lines.append(f"{len(analyzed_javascript_urls)} JavaScript file(s) analyzed:")
+        for script_url in analyzed_javascript_urls:
+            lines.append(f"- {script_url}")
     return "\n".join(lines)
 
 
@@ -156,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     endpoint_findings = None
     page_findings = None
     discovered_api_paths: list[str] = []
+    analyzed_javascript_urls: list[str] = []
     if args.url:
         log_verbose(args.verbose, f"Starting endpoint scan for {args.url}")
         endpoint_findings = scan_url(
@@ -174,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             page_findings = crawl_result.findings
             discovered_api_paths = crawl_result.discovered_api_paths
+            analyzed_javascript_urls = crawl_result.analyzed_javascript_urls
             log_verbose(args.verbose, f"Page source crawl complete: {len(page_findings)} finding(s)")
             known_api_paths = set(api_paths)
             new_api_paths = [path for path in discovered_api_paths if path not in known_api_paths]
@@ -197,10 +206,11 @@ def main(argv: list[str] | None = None) -> int:
             "endpoint_findings": [finding.to_dict() for finding in endpoint_findings or []],
             "page_findings": [finding.to_dict() for finding in page_findings or []],
             "discovered_api_paths": discovered_api_paths,
+            "analyzed_javascript_urls": analyzed_javascript_urls,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(render_text(findings, endpoint_findings, page_findings, discovered_api_paths))
+        print(render_text(findings, endpoint_findings, page_findings, discovered_api_paths, analyzed_javascript_urls))
 
     web_failure = any(SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[args.fail_on] for finding in endpoint_findings or [])
     page_failure = has_failure(page_findings or [], args.fail_on)
