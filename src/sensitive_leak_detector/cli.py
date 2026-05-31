@@ -6,7 +6,7 @@ from pathlib import Path
 import sys
 
 from .scanner import SEVERITY_RANK, Finding, has_failure, scan_path
-from .web import EndpointFinding, scan_url
+from .web import EndpointFinding, crawl_pages, scan_url
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +30,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Text file containing API paths to test, one path per line.",
     )
     parser.add_argument(
+        "-d",
+        "--depth",
+        type=int,
+        default=0,
+        help="Crawl same-origin pages to this depth and scan page source. 0 disables page crawling.",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=50,
+        help="Maximum number of pages to crawl when --depth is greater than 0.",
+    )
+    parser.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -51,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-v",
         "--verbose",
         action="store_true",
-        help="Show scan progress and endpoint probe activity.",
+        help="Show local scan, endpoint probe, and page crawl activity.",
     )
     return parser
 
@@ -71,7 +84,11 @@ def log_verbose(enabled: bool, message: str) -> None:
         print(f"[sld] {message}", file=sys.stderr)
 
 
-def render_text(findings: list[Finding], endpoint_findings: list[EndpointFinding] | None) -> str:
+def render_text(
+    findings: list[Finding],
+    endpoint_findings: list[EndpointFinding] | None,
+    page_findings: list[Finding] | None,
+) -> str:
     lines: list[str] = []
     if not findings:
         lines.append("No local sensitive data findings detected.")
@@ -94,6 +111,18 @@ def render_text(findings: list[Finding], endpoint_findings: list[EndpointFinding
     elif endpoint_findings == []:
         lines.append("")
         lines.append("No exposed endpoint findings detected.")
+
+    if page_findings:
+        lines.append("")
+        lines.append(f"{len(page_findings)} page source finding(s) detected:")
+        for finding in page_findings:
+            lines.append(
+                f"{finding.path}:{finding.line}:{finding.column} "
+                f"[{finding.severity}] {finding.rule_id} - {finding.description} ({finding.match})"
+            )
+    elif page_findings == []:
+        lines.append("")
+        lines.append("No page source findings detected.")
     return "\n".join(lines)
 
 
@@ -104,6 +133,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not target.exists():
         parser.error(f"path does not exist: {target}")
+    if args.depth < 0:
+        parser.error("--depth must be 0 or greater")
+    if args.max_pages < 1:
+        parser.error("--max-pages must be 1 or greater")
 
     log_verbose(args.verbose, f"Scanning local path: {target.resolve()}")
     findings = scan_path(target, excludes=set(args.exclude))
@@ -114,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         log_verbose(args.verbose, f"Loaded {len(api_paths)} custom API path(s)")
 
     endpoint_findings = None
+    page_findings = None
     if args.url:
         log_verbose(args.verbose, f"Starting endpoint scan for {args.url}")
         endpoint_findings = scan_url(
@@ -122,18 +156,29 @@ def main(argv: list[str] | None = None) -> int:
             progress=lambda message: log_verbose(args.verbose, message),
         )
         log_verbose(args.verbose, f"Endpoint scan complete: {len(endpoint_findings)} finding(s)")
+        if args.depth > 0:
+            log_verbose(args.verbose, f"Starting page source crawl for {args.url}")
+            page_findings = crawl_pages(
+                args.url,
+                depth=args.depth,
+                max_pages=args.max_pages,
+                progress=lambda message: log_verbose(args.verbose, message),
+            )
+            log_verbose(args.verbose, f"Page source crawl complete: {len(page_findings)} finding(s)")
 
     if args.format == "json":
         payload = {
             "local_findings": [finding.to_dict() for finding in findings],
             "endpoint_findings": [finding.to_dict() for finding in endpoint_findings or []],
+            "page_findings": [finding.to_dict() for finding in page_findings or []],
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
-        print(render_text(findings, endpoint_findings))
+        print(render_text(findings, endpoint_findings, page_findings))
 
     web_failure = any(SEVERITY_RANK[finding.severity] >= SEVERITY_RANK[args.fail_on] for finding in endpoint_findings or [])
-    return 1 if has_failure(findings, args.fail_on) or web_failure else 0
+    page_failure = has_failure(page_findings or [], args.fail_on)
+    return 1 if has_failure(findings, args.fail_on) or web_failure or page_failure else 0
 
 
 if __name__ == "__main__":
