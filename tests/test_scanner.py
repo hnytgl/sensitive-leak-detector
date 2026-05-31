@@ -1,7 +1,14 @@
 import unittest
 
 from sensitive_leak_detector.scanner import has_failure, scan_text
-from sensitive_leak_detector.web import EndpointProbe, looks_interesting, normalize_base_url
+from sensitive_leak_detector.web import (
+    EndpointProbe,
+    build_api_probes,
+    looks_interesting,
+    looks_like_sensitive_api_response,
+    normalize_base_url,
+    scan_url,
+)
 
 
 class ScannerTests(unittest.TestCase):
@@ -40,6 +47,27 @@ class ScannerTests(unittest.TestCase):
 
         self.assertTrue(looks_interesting(200, "text/plain", "DB_PASSWORD=example", probe))
         self.assertFalse(looks_interesting(404, "text/plain", "DB_PASSWORD=example", probe))
+
+    def test_sensitive_api_response_detection(self):
+        body = '{"data":[{"user_id":1,"email":"a@example.com","phone":"13800138000"}],"total":1}'
+
+        self.assertTrue(looks_like_sensitive_api_response("application/json", body))
+        self.assertFalse(looks_like_sensitive_api_response("text/html", "<html>ok</html>"))
+
+    def test_custom_api_paths_are_normalized_and_deduplicated(self):
+        probes = build_api_probes(["api/private/users", "/api/private/users"])
+
+        matches = [probe for probe in probes if probe.path == "/api/private/users"]
+        self.assertEqual(len(matches), 1)
+        self.assertTrue(matches[0].api_probe)
+
+    def test_scan_url_reports_progress(self):
+        messages: list[str] = []
+
+        scan_url("https://example.invalid", timeout=0.01, api_paths=[], progress=messages.append)
+
+        self.assertTrue(any("Prepared" in message for message in messages))
+        self.assertTrue(any("Testing" in message for message in messages))
 
 
 if __name__ == "__main__":
