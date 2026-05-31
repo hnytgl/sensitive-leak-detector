@@ -20,6 +20,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="HTTP/HTTPS base URL to test for common exposed sensitive endpoints.",
     )
     parser.add_argument(
+        "--api-path",
+        action="append",
+        default=[],
+        help="Additional API path to test, such as /api/v1/users. Can be provided more than once.",
+    )
+    parser.add_argument(
+        "--api-path-file",
+        help="Text file containing API paths to test, one path per line.",
+    )
+    parser.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -37,7 +47,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Directory, file name, or glob pattern to skip. Can be provided more than once.",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show scan progress and endpoint probe activity.",
+    )
     return parser
+
+
+def load_api_paths(values: list[str], path_file: str | None) -> list[str]:
+    paths = [value.strip() for value in values if value.strip()]
+    if path_file:
+        for line in Path(path_file).read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                paths.append(stripped)
+    return paths
+
+
+def log_verbose(enabled: bool, message: str) -> None:
+    if enabled:
+        print(f"[sld] {message}", file=sys.stderr)
 
 
 def render_text(findings: list[Finding], endpoint_findings: list[EndpointFinding] | None) -> str:
@@ -74,8 +105,23 @@ def main(argv: list[str] | None = None) -> int:
     if not target.exists():
         parser.error(f"path does not exist: {target}")
 
+    log_verbose(args.verbose, f"Scanning local path: {target.resolve()}")
     findings = scan_path(target, excludes=set(args.exclude))
-    endpoint_findings = scan_url(args.url) if args.url else None
+    log_verbose(args.verbose, f"Local scan complete: {len(findings)} finding(s)")
+
+    api_paths = load_api_paths(args.api_path, args.api_path_file)
+    if api_paths:
+        log_verbose(args.verbose, f"Loaded {len(api_paths)} custom API path(s)")
+
+    endpoint_findings = None
+    if args.url:
+        log_verbose(args.verbose, f"Starting endpoint scan for {args.url}")
+        endpoint_findings = scan_url(
+            args.url,
+            api_paths=api_paths,
+            progress=lambda message: log_verbose(args.verbose, message),
+        )
+        log_verbose(args.verbose, f"Endpoint scan complete: {len(endpoint_findings)} finding(s)")
 
     if args.format == "json":
         payload = {
