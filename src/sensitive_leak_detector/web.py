@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 import json
 import socket
 import ssl
+from typing import Callable
 from urllib import error, parse, request
 
 
@@ -17,6 +18,7 @@ class EndpointProbe:
     body: bytes | None = None
     content_type: str | None = None
     signatures: tuple[str, ...] = ()
+    api_probe: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,74 @@ COMMON_PROBES: tuple[EndpointProbe, ...] = (
     ),
 )
 
-SENSITIVE_WORDS = ("password", "passwd", "secret", "token", "api_key", "apikey", "access_key", "private_key")
+COMMON_API_PATHS = (
+    "/api/users",
+    "/api/user",
+    "/api/admin/users",
+    "/api/customers",
+    "/api/orders",
+    "/api/order/list",
+    "/api/products",
+    "/api/accounts",
+    "/api/profiles",
+    "/api/config",
+    "/api/settings",
+    "/api/debug",
+    "/api/logs",
+    "/api/tokens",
+    "/api/auth/user",
+    "/api/me",
+    "/api/profile",
+    "/api/export",
+    "/api/v1/users",
+    "/api/v1/user",
+    "/api/v1/admin/users",
+    "/api/v1/customers",
+    "/api/v1/orders",
+    "/api/v1/accounts",
+    "/api/v1/config",
+    "/api/v1/settings",
+    "/api/v1/debug",
+    "/api/v1/logs",
+    "/api/v1/me",
+    "/api/v1/profile",
+    "/api/v2/users",
+    "/api/v2/customers",
+    "/api/v2/orders",
+    "/api/v2/config",
+)
+
+SENSITIVE_WORDS = (
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "access_key",
+    "private_key",
+)
+
+SENSITIVE_API_WORDS = SENSITIVE_WORDS + (
+    "email",
+    "phone",
+    "mobile",
+    "idcard",
+    "identity",
+    "address",
+    "cardno",
+    "bank",
+    "balance",
+    "amount",
+    "order",
+    "user_id",
+    "username",
+    "realname",
+    "name",
+    "customer",
+)
+
+LIST_HINTS = ("[", '"data"', '"items"', '"records"', '"rows"', '"list"', '"total"')
 
 
 def normalize_base_url(value: str) -> str:
@@ -94,12 +163,35 @@ def summarize_evidence(body: str, signatures: tuple[str, ...]) -> str:
     return "Endpoint returned a potentially sensitive response."
 
 
+def is_json_response(content_type: str, body: str) -> bool:
+    stripped = body.lstrip()
+    return "json" in content_type.lower() or stripped.startswith("{") or stripped.startswith("[")
+
+
+def looks_like_sensitive_api_response(content_type: str, body: str) -> bool:
+    if not is_json_response(content_type, body):
+        return False
+
+    lowered = body.lower()
+    sensitive_hits = sum(1 for word in SENSITIVE_API_WORDS if word in lowered)
+    has_collection_shape = any(hint in lowered for hint in LIST_HINTS)
+    has_object_shape = lowered.startswith("{") or lowered.startswith("[")
+
+    if sensitive_hits >= 2 and has_object_shape:
+        return True
+    if sensitive_hits >= 1 and has_collection_shape:
+        return True
+    return False
+
+
 def looks_interesting(status: int, content_type: str, body: str, probe: EndpointProbe) -> bool:
     if status not in {200, 206, 301, 302, 307, 308}:
         return False
     if probe.rule_id in {"backup-archive", "spring-heapdump"} and status in {200, 206}:
         return True
     lowered = body.lower()
+    if probe.api_probe:
+        return looks_like_sensitive_api_response(content_type, body)
     if probe.signatures and any(signature.lower() in lowered for signature in probe.signatures):
         return True
     if "json" in content_type.lower() and any(word in lowered for word in SENSITIVE_WORDS):
@@ -124,16 +216,58 @@ def fetch_probe(url: str, probe: EndpointProbe, timeout: float) -> tuple[int, st
         return None
 
 
-def scan_url(base_url: str, timeout: float = 5.0, probes: tuple[EndpointProbe, ...] = COMMON_PROBES) -> list[EndpointFinding]:
+def build_api_probes(paths: list[str] | None = None) -> tuple[EndpointProbe, ...]:
+    selected_paths = list(COMMON_API_PATHS)
+    if paths:
+        selected_paths.extend(path if path.startswith("/") else f"/{path}" for path in paths)
+
+    seen: set[str] = set()
+    probes: list[EndpointProbe] = []
+    for path in selected_paths:
+        if path in seen:
+            continue
+        seen.add(path)
+        probes.append(
+            EndpointProbe(
+                path=path,
+                rule_id="api-sensitive-data",
+                description="API endpoint may expose sensitive business or user data",
+                severity="high",
+                signatures=SENSITIVE_API_WORDS,
+                api_probe=True,
+            )
+        )
+    return tuple(probes)
+
+
+def scan_url(
+    base_url: str,
+    timeout: float = 5.0,
+    probes: tuple[EndpointProbe, ...] = COMMON_PROBES,
+    api_paths: list[str] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> list[EndpointFinding]:
     normalized = normalize_base_url(base_url)
     findings: list[EndpointFinding] = []
-    for probe in probes:
+    all_probes = probes + build_api_probes(api_paths)
+    if progress:
+        progress(f"Target normalized to {normalized}")
+        progress(f"Prepared {len(all_probes)} endpoint probe(s)")
+    for probe in all_probes:
         url = build_url(normalized, probe.path)
+        if progress:
+            progress(f"Testing {probe.method} {url}")
         result = fetch_probe(url, probe, timeout)
         if result is None:
+            if progress:
+                progress(f"No response from {url}")
             continue
         status, content_type, body = result
+        if progress:
+            progress(f"Received {status} from {url}")
         if looks_interesting(status, content_type, body, probe):
+            if progress:
+                progress(f"Finding matched: {probe.rule_id} at {url}")
             findings.append(
                 EndpointFinding(
                     url=url,
