@@ -4,6 +4,7 @@ from sensitive_leak_detector.scanner import has_failure, scan_text
 from sensitive_leak_detector.web import (
     EndpointProbe,
     build_api_probes,
+    extract_page_links,
     looks_interesting,
     looks_like_sensitive_api_response,
     normalize_base_url,
@@ -68,6 +69,15 @@ class ScannerTests(unittest.TestCase):
 
         self.assertTrue(any("Prepared" in message for message in messages))
         self.assertTrue(any("Testing" in message for message in messages))
+
+    def test_extract_page_links_keeps_same_origin_pages(self):
+        html = '<a href="/next">next</a><script src="/app.js"></script><a href="https://other.example/x">offsite</a>'
+
+        links = extract_page_links("https://example.com/start", html)
+
+        self.assertIn("https://example.com/next", links)
+        self.assertIn("https://example.com/app.js", links)
+        self.assertNotIn("https://other.example/x", links)
 
 
 if __name__ == "__main__":
