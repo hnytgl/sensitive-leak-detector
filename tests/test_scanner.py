@@ -5,6 +5,7 @@ from sensitive_leak_detector.web import (
     EndpointProbe,
     build_api_probes,
     extract_api_paths,
+    extract_javascript_links,
     extract_page_links,
     looks_interesting,
     looks_like_sensitive_api_response,
@@ -77,8 +78,15 @@ class ScannerTests(unittest.TestCase):
         links = extract_page_links("https://example.com/start", html)
 
         self.assertIn("https://example.com/next", links)
-        self.assertIn("https://example.com/app.js", links)
+        self.assertNotIn("https://example.com/app.js", links)
         self.assertNotIn("https://other.example/x", links)
+
+    def test_extract_javascript_links_keeps_same_origin_scripts(self):
+        html = '<script src="/app.js"></script><script src="https://other.example/app.js"></script>'
+
+        links = extract_javascript_links("https://example.com/start", html)
+
+        self.assertEqual(links, ["https://example.com/app.js"])
 
     def test_extract_api_paths_from_page_source(self):
         html = """
