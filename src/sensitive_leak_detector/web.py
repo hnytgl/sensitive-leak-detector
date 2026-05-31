@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 import json
+import re
 import socket
 import ssl
 from typing import Callable
@@ -35,6 +36,12 @@ class EndpointFinding:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class CrawlResult:
+    findings: list[Finding]
+    discovered_api_paths: list[str]
 
 
 COMMON_PROBES: tuple[EndpointProbe, ...] = (
@@ -136,6 +143,21 @@ SENSITIVE_API_WORDS = SENSITIVE_WORDS + (
 
 LIST_HINTS = ("[", '"data"', '"items"', '"records"', '"rows"', '"list"', '"total"')
 
+API_REFERENCE = re.compile(
+    r"""
+    (?:
+        https?://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]+/api/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*
+        |
+        (?<![A-Za-z0-9_])
+        /api/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*
+        |
+        (?<![A-Za-z0-9_])
+        api/[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 PAGE_EXTENSIONS_TO_SKIP = (
     ".7z",
     ".avi",
@@ -196,6 +218,29 @@ def normalize_page_url(base_url: str, candidate: str) -> str | None:
     if parsed.path.lower().endswith(PAGE_EXTENSIONS_TO_SKIP):
         return None
     return parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, ""))
+
+
+def normalize_api_reference(base_url: str, candidate: str) -> str | None:
+    cleaned = candidate.strip(" \t\r\n'\"`),;]")
+    absolute = parse.urljoin(base_url, cleaned)
+    parsed_base = parse.urlparse(base_url)
+    parsed = parse.urlparse(absolute)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc != parsed_base.netloc:
+        return None
+    if "/api/" not in parsed.path and parsed.path != "/api":
+        return None
+    return parse.urlunparse(("", "", parsed.path, "", parsed.query, ""))
+
+
+def extract_api_paths(base_url: str, text: str) -> list[str]:
+    seen: set[str] = set()
+    paths: list[str] = []
+    for match in API_REFERENCE.finditer(text):
+        normalized = normalize_api_reference(base_url, match.group(0))
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            paths.append(normalized)
+    return paths
 
 
 def extract_page_links(base_url: str, html: str) -> list[str]:
@@ -313,8 +358,8 @@ def is_page_like(content_type: str, body: str) -> bool:
     )
 
 
-def build_api_probes(paths: list[str] | None = None) -> tuple[EndpointProbe, ...]:
-    selected_paths = list(COMMON_API_PATHS)
+def build_api_probes(paths: list[str] | None = None, include_defaults: bool = True) -> tuple[EndpointProbe, ...]:
+    selected_paths = list(COMMON_API_PATHS) if include_defaults else []
     if paths:
         selected_paths.extend(path if path.startswith("/") else f"/{path}" for path in paths)
 
@@ -342,11 +387,12 @@ def scan_url(
     timeout: float = 5.0,
     probes: tuple[EndpointProbe, ...] = COMMON_PROBES,
     api_paths: list[str] | None = None,
+    include_common: bool = True,
     progress: Callable[[str], None] | None = None,
 ) -> list[EndpointFinding]:
     normalized = normalize_base_url(base_url)
     findings: list[EndpointFinding] = []
-    all_probes = probes + build_api_probes(api_paths)
+    all_probes = (probes if include_common else ()) + build_api_probes(api_paths, include_defaults=include_common)
     if progress:
         progress(f"Target normalized to {normalized}")
         progress(f"Prepared {len(all_probes)} endpoint probe(s)")
@@ -384,15 +430,17 @@ def crawl_pages(
     timeout: float = 5.0,
     max_pages: int = 50,
     progress: Callable[[str], None] | None = None,
-) -> list[Finding]:
+) -> CrawlResult:
     if depth <= 0:
-        return []
+        return CrawlResult(findings=[], discovered_api_paths=[])
 
     start_url = normalize_base_url(base_url) or base_url
     queue: list[tuple[str, int]] = [(start_url, 1)]
     queued = {start_url}
     visited: set[str] = set()
     findings: list[Finding] = []
+    discovered_api_paths: list[str] = []
+    seen_api_paths: set[str] = set()
 
     if progress:
         progress(f"Starting page crawl at depth {depth} with max {max_pages} page(s)")
@@ -423,6 +471,14 @@ def crawl_pages(
             progress(f"Page findings matched at {current_url}: {len(page_findings)}")
         findings.extend(page_findings)
 
+        page_api_paths = extract_api_paths(current_url, body)
+        for api_path in page_api_paths:
+            if api_path not in seen_api_paths:
+                seen_api_paths.add(api_path)
+                discovered_api_paths.append(api_path)
+                if progress:
+                    progress(f"Discovered API reference in page source: {api_path}")
+
         if current_depth >= depth or not is_page_like(content_type, body):
             continue
 
@@ -432,5 +488,8 @@ def crawl_pages(
                 queue.append((link, current_depth + 1))
 
     if progress:
-        progress(f"Page crawl complete: {len(visited)} page(s), {len(findings)} finding(s)")
-    return findings
+        progress(
+            f"Page crawl complete: {len(visited)} page(s), "
+            f"{len(findings)} finding(s), {len(discovered_api_paths)} API path(s)"
+        )
+    return CrawlResult(findings=findings, discovered_api_paths=discovered_api_paths)
