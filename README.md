@@ -202,6 +202,14 @@ sld . --url https://example.com --api-path-file .\api-paths.txt --format json -v
 
 爬取范围默认限制在同域名内，并会跳过图片、字体、压缩包、视频等静态资源。可以用 `--max-pages` 控制最大页面数，避免站点页面过多时耗时太长。
 
+工具会单独分析页面引用的同域名 JavaScript 文件。只要页面里出现：
+
+```html
+<script src="/assets/app.js"></script>
+```
+
+就会下载 `/assets/app.js`，扫描其中的密钥、Token、高熵配置和 API 地址。`-d 1` 会检测入口页面以及入口页面引用的 JS 文件；更高深度会继续分析后续页面引用的 JS。
+
 当页面源码中发现 API 地址时，工具会自动把这些 API 加入探测队列，例如源码中的：
 
 ```javascript
@@ -210,6 +218,7 @@ axios.get('https://example.com/api/orders')
 ```
 
 会被自动归一化为同站 API 路径并继续检测是否返回敏感数据。JSON 输出中会包含 `discovered_api_paths`，文本输出中也会列出从页面源码发现的 API 路径。
+JSON 输出中还会包含 `analyzed_javascript_urls`，用于查看哪些 JS 文件已经被分析。
 
 接口探测只会发起普通 HTTP GET/POST 请求，不会进行绕过、爆破、利用或破坏性操作。请仅在你拥有授权的系统上使用。
 
@@ -233,6 +242,9 @@ https://example.com/:20:15 [medium] high-entropy-assignment - High-entropy value
 2 API path(s) discovered from page source:
 - /api/v1/users
 - /api/orders
+
+1 JavaScript file(s) analyzed:
+- https://example.com/assets/app.js
 ```
 
 ## 安全建议
